@@ -1,0 +1,5 @@
+names:
+  0: oil
+path: /kaggle/input/datasets/mmuthukumar07/oil-spill-dataset/yolo26_dataset
+train: images/train
+val: images/val

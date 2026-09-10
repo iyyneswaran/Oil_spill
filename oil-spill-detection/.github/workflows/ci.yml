@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Lint, type-check, and test
+        run: make check
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+
+      - name: Build image
+        run: docker build -t oilspill-app .
+
+      - name: Start container and check health
+        run: |
+          docker run -d --name oilspill -p 7860:7860 oilspill-app
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:7860/healthz; then echo "healthy"; break; fi
+            sleep 5
+          done
+          curl -fsS http://localhost:7860/healthz || { echo "not healthy"; docker logs oilspill; exit 1; }
+
+      - name: Report image size
+        if: always()
+        run: docker image ls oilspill-app
