@@ -106,6 +106,14 @@ Install the optional dependency with `uv sync --extra yolo --group dev`, then se
 YOLO job errors never expose the configured local filesystem path; scene-job
 submission returns HTTP 503 when weights or `ultralytics` are unavailable.
 
+## Frontend Display
+
+While `YoloDetector.detect()` computes comprehensive derived contours and candidate geometries, the frontend UI has been simplified to directly display the YOLO inference output:
+
+1.  **Annotated Image:** The backend API encodes the SAR image with overlaid bounding boxes and YOLO confidence labels as a data URI (`yolo_result_image`).
+2.  **Raw Bounding Boxes:** The GeoJSON returned to the frontend contains `Polygon` geometries representing the georeferenced bounding boxes, not contour-derived shapes.
+3.  **Simplified Features:** Feature properties contain the raw detection attributes (`spill_id`, `bbox`, `model_confidence`, `class_name`) rather than the derived measurements (`derived_contour_area_km2`, `investigation_confidence`, etc.).
+
 ## Limitations
 
 The YOLO MVP pathway explicitly does **not** implement:

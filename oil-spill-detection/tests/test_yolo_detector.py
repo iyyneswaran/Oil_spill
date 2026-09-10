@@ -393,3 +393,17 @@ def test_api_yolo_status_missing(tmp_path: Path):
         job_resp = client.post("/jobs/scene", json=body)
         assert job_resp.status_code == 503
         assert "YOLO detector unavailable" in job_resp.text
+
+
+def test_annotate_yolo_image():
+    from oilspill.api.service import annotate_yolo_image
+    from oilspill.detectors.yolo_detector import RawDetection
+    import numpy as np
+
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    detections = [
+        RawDetection(x1=10, y1=10, x2=20, y2=20, confidence=0.9, class_id=0, tile_index=0)
+    ]
+    data_uri = annotate_yolo_image(img, detections)
+    
+    assert data_uri.startswith("data:image/png;base64,")

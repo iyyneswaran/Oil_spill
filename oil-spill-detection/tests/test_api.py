@@ -318,7 +318,7 @@ def test_yolo_status_and_scene_job_lifecycle(
     ) -> JobResult:
         return JobResult(
             num_oil_polygons=1,
-            total_oil_area_km2=0.02,
+            total_oil_area_km2=0.0,
             geojson={
                 "type": "FeatureCollection",
                 "features": [
@@ -329,14 +329,22 @@ def test_yolo_status_and_scene_job_lifecycle(
                             "coordinates": [[[1.0, 1.0], [1.1, 1.0], [1.1, 1.1], [1.0, 1.0]]],
                         },
                         "properties": {
-                            "detector_type": "yolo_mvp",
-                            "geometry_source": "derived_contour",
+                            "spill_id": "SPILL_001",
+                            "latitude": 1.05,
+                            "longitude": 1.05,
+                            "bbox": [10, 10, 50, 50],
+                            "confidence": 0.8,
                             "model_confidence": 0.8,
-                            "investigation_confidence": 0.7,
+                            "class_id": 0,
+                            "class_name": "oil",
+                            "detector_type": "yolo_mvp",
+                            "model_id": "best.pt",
+                            "tile_provenance": [0],
                         },
                     }
                 ],
             },
+            yolo_result_image="data:image/png;base64,mockbase64",
         )
 
     monkeypatch.setattr("oilspill.api.service._run_yolo_detection", _fake_yolo)
@@ -361,7 +369,11 @@ def test_yolo_status_and_scene_job_lifecycle(
         status = c.get(f"/jobs/{job_id}").json()
     assert status["status"] == "done"
     assert status["result"]["num_oil_polygons"] == 1
-    assert status["result"]["geojson"]["features"][0]["properties"]["detector_type"] == "yolo_mvp"
+    props = status["result"]["geojson"]["features"][0]["properties"]
+    assert props["detector_type"] == "yolo_mvp"
+    assert props["spill_id"] == "SPILL_001"
+    assert "investigation_confidence" not in props
+    assert status["result"]["yolo_result_image"].startswith("data:image/png;base64,")
 
 
 def test_yolo_dependency_missing_is_not_advertised_as_available(

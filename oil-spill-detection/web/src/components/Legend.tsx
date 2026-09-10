@@ -2,13 +2,14 @@ import { CLASSES, OIL_CLASS_NAME, colorForClass, rgbToCss } from "../lib/classes
 import type { RGB } from "../lib/types";
 
 interface Props {
-  // class key -> percentage, as returned by /predict class_percentages
   percentages: Record<string, number>;
   legend?: Record<string, RGB>;
+  /** Optional: which classes are currently visible (for toggling overlay layers). */
+  visibleClasses?: Set<string>;
+  /** Called when a class visibility is toggled. */
+  onToggleClass?: (className: string) => void;
 }
 
-// Order rows by the canonical class list, then append any extra keys the API
-// returned that we don't recognise, so nothing is silently dropped.
 function orderedKeys(percentages: Record<string, number>): string[] {
   const known = CLASSES.map((c) => c.name).filter(
     (name) => name in percentages,
@@ -19,19 +20,33 @@ function orderedKeys(percentages: Record<string, number>): string[] {
   return [...known, ...extra];
 }
 
-export default function Legend({ percentages, legend }: Props) {
+export default function Legend({ percentages, legend, visibleClasses, onToggleClass }: Props) {
   const keys = orderedKeys(percentages);
+  const hasToggle = visibleClasses !== undefined && onToggleClass !== undefined;
+
   return (
-    <div className="legend" data-testid="legend">
+    <div className="legend" data-testid="legend" role="list" aria-label="Class legend">
       {keys.map((key) => {
         const pct = percentages[key] ?? 0;
         const isOil = key === OIL_CLASS_NAME;
+        const isVisible = !hasToggle || visibleClasses!.has(key);
         return (
           <div
             key={key}
             className={`legend-row${isOil ? " oil" : ""}`}
             data-testid="legend-row"
+            role="listitem"
+            style={!isVisible ? { opacity: 0.4 } : undefined}
           >
+            {hasToggle && (
+              <input
+                type="checkbox"
+                checked={isVisible}
+                onChange={() => onToggleClass!(key)}
+                aria-label={`Toggle ${key} visibility`}
+                style={{ accentColor: "var(--accent)" }}
+              />
+            )}
             <span
               className="legend-swatch"
               style={{ background: rgbToCss(colorForClass(key, legend)) }}

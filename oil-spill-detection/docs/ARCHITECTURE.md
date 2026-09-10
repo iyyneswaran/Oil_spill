@@ -156,13 +156,9 @@ NMS, and records tile provenance. Its external checkpoint has one `oil` class
 only: YOLO is not a five-class semantic classifier.
 
 1. **Segmentation (Default/Production)** — The primary pathway using the ONNX semantic-segmentation model described above. It produces pixel-level masks and is the focus of all metrics reporting.
-2. **YOLO MVP** — A secondary bounding-box pathway introduced for rapid MVP candidate generation. It uses a YOLO detection model to find candidate regions, then derives an *approximate* polygon contour directly from the SAR image data inside the box.
+2. **YOLO MVP** — A secondary bounding-box pathway introduced for rapid MVP candidate generation. It uses a YOLO detection model to find candidate regions. In the frontend display path, the service layer returns the raw bounding boxes directly (without deriving approximate polygon contours), accompanied by an annotated SAR image showing the detections.
 
-Both pathways emit a shared `DetectionOutput` contract. This ensures downstream systems (API and frontend) never confuse YOLO image-derived contours with true segmentation masks. The YOLO MVP pathway requires `ultralytics` and an external checkpoint. See [`yolo_mvp.md`](yolo_mvp.md) for detailed configuration, the SAR-to-YOLO rendering assumptions, and the investigation confidence scoring heuristic.
-
-YOLO polygons are either `derived_contour` / `approximate` or `bbox_fallback` /
-`fallback`; a fallback rectangle is never presented as a slick shape. Candidate
-GeoJSON is EPSG:4326 and the contract separates raw `model_confidence` from the
+While both pathways share common infrastructure, the YOLO MVP frontend display diverges by presenting raw `[x1, y1, x2, y2]` bounding-box polygons and an annotated inference image rather than contour-derived polygons. The contour extraction pipeline remains available programmatically via `YoloDetector.detect()` but is not the primary frontend result. See [`yolo_mvp.md`](yolo_mvp.md) for detailed configuration and the SAR-to-YOLO rendering assumptions.
 non-calibrated heuristic `investigation_confidence`, including every score
 adjustment, quality flag, approximate geodesic measurements, and component/tile
 provenance. The only implemented look-alike cues are transparent penalties or

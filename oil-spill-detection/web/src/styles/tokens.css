@@ -1,0 +1,69 @@
+/*
+ * Design tokens for the Oil Spill Detection Console.
+ *
+ * All colour, type, and spacing decisions live here so every component file
+ * references one source of truth.  Class-overlay colours come verbatim from
+ * oilspill.data.colors — do not invent alternatives.
+ */
+
+:root {
+  /* ── Surface hierarchy ─────────────────────────────────────────────── */
+  --bg: #F3F6F5;
+  --surface: #FFFFFF;
+  --border: #D7DEDC;
+  --border-strong: #A9B8B4;
+
+  /* ── Ink ────────────────────────────────────────────────────────────── */
+  --ink: #10201D;
+  --ink-muted: #526661;
+
+  /* ── Accent (one only) ─────────────────────────────────────────────── */
+  --accent: #0B6E8F;
+  --accent-hover: #095A75;
+  --accent-ink: #F3F6F5;
+
+  /* ── Semantic ───────────────────────────────────────────────────────── */
+  --candidate: #B5541A;       /* YOLO "investigation candidate" — only this meaning */
+  --candidate-bg: rgba(181, 84, 26, 0.08);
+  --candidate-border: rgba(181, 84, 26, 0.3);
+  --danger: #B91C1C;
+  --danger-bg: rgba(185, 28, 28, 0.06);
+  --danger-border: rgba(185, 28, 28, 0.25);
+  --ok: #15803D;
+  --ok-bg: rgba(21, 128, 61, 0.06);
+  --ok-border: rgba(21, 128, 61, 0.25);
+
+  /* ── Class-overlay colours (from oilspill.data.colors) ─────────────── */
+  --class-sea: rgb(0, 0, 0);
+  --class-oil: rgb(0, 255, 255);
+  --class-lookalike: rgb(255, 0, 0);
+  --class-ship: rgb(153, 76, 0);
+  --class-land: rgb(0, 153, 0);
+
+  /* ── Type families ─────────────────────────────────────────────────── */
+  --font-display: "Archivo", "Archivo Expanded", sans-serif;
+  --font-body: "Source Sans 3", "Source Sans Pro", sans-serif;
+  --font-mono: "IBM Plex Mono", "Consolas", monospace;
+
+  /* ── Type scale ────────────────────────────────────────────────────── */
+  --text-h1: 600 48px/56px var(--font-display);
+  --text-h2: 600 28px/34px var(--font-display);
+  --text-h3: 600 20px/28px var(--font-display);
+  --text-body: 400 15px/24px var(--font-body);
+  --text-meta: 400 13px/18px var(--font-body);
+  --text-mono: 400 13px/20px var(--font-mono);
+
+  /* ── Spacing ────────────────────────────────────────────────────────── */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* ── Misc ────────────────────────────────────────────────────────────── */
+  --radius-control: 6px;      /* buttons, inputs only */
+  --max-width: 1280px;
+
+  color-scheme: light;
+}

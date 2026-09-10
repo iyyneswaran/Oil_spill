@@ -414,6 +414,17 @@ def _run_scene_detection(
         )
 
 
+def annotate_yolo_image(yolo_image: np.ndarray, detections: list[Any]) -> str:
+    """Draw bounding boxes and confidence labels on the YOLO image and return a data URI."""
+    import cv2
+    img = yolo_image.copy()
+    for det in detections:
+        cv2.rectangle(img, (det.x1, det.y1), (det.x2, det.y2), (255, 0, 0), 2)
+        label = f"oil {det.confidence:.2f}"
+        cv2.putText(img, label, (det.x1, max(det.y1 - 5, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+    return _png_data_uri(img)
+
+
 def _run_yolo_detection(
     aoi: dict[str, Any],
     start: str,
@@ -423,13 +434,19 @@ def _run_yolo_detection(
 ) -> JobResult:
     """Run a full CDSE -> SAFE -> filtered-dB -> YOLO MVP scene job."""
     import tempfile
-
+    
     from oilspill.detectors.yolo_detector import (
         YoloDetector,
         YoloDetectorConfig,
         yolo_dependency_available,
+        sar_to_yolo_image,
+        run_tiled_yolo,
+        bbox_to_polygon,
+        geometry_to_wgs84_geojson,
     )
-    from oilspill.pipeline.detect import detect_yolo_from_aoi
+    from oilspill.pipeline.detect import _download_safe_for_aoi
+    from oilspill.pipeline.preprocess import calibrate_safe, lee_filter, to_db
+    from shapely.geometry import shape as shapely_shape
 
     if settings.yolo_weights is None or not settings.yolo_weights.exists():
         raise FileNotFoundError(
@@ -456,74 +473,90 @@ def _run_yolo_detection(
         low_wind_threshold=settings.yolo_low_wind_threshold,
     )
     detector = YoloDetector(config)
+    model = detector._load_model()
+    model_id = str(config.weights_path.name) if config.weights_path else "yolo_mvp"
+
     with tempfile.TemporaryDirectory(prefix="oilspill-yolo-scene-") as tmp:
         out_dir = Path(tmp)
         aoi_path = out_dir / "aoi.geojson"
         aoi_path.write_text(json.dumps(aoi), encoding="utf-8")
-        output = detect_yolo_from_aoi(
-            aoi_path,
-            start,
-            end,
-            detector,
-            out_dir,
-            coastlines_path=settings.coastlines_path,
-            env_context=env_context,
-        )
+        
+        safe_path = _download_safe_for_aoi(aoi_path, start, end, out_dir)
+        scene = calibrate_safe(safe_path, polarisation="vv")
+        filtered = lee_filter(scene.sigma0, size=7)
+        db = to_db(filtered)
+
+    yolo_image = sar_to_yolo_image(db, db_min=config.db_min, db_max=config.db_max)
+    detections = run_tiled_yolo(
+        model,
+        yolo_image,
+        tile_size=config.tile_size,
+        tile_overlap=config.tile_overlap,
+        conf=config.conf_threshold,
+        iou=config.iou_threshold,
+    )
+
+    yolo_result_image = annotate_yolo_image(yolo_image, detections)
 
     features: list[dict[str, Any]] = []
-    total_derived_area = 0.0
-    for candidate in output.candidates:
-        derived_area = candidate.derived_contour_area_km2
-        if derived_area is not None:
-            total_derived_area += derived_area
+    
+    for i, det in enumerate(detections):
+        spill_id = f"SPILL_{i+1:03d}"
+        
+        # Bbox in WGS84 GeoJSON
+        bbox_geojson = bbox_to_polygon(det.x1, det.y1, det.x2, det.y2, scene.transform)
+        wgs84_geojson = geometry_to_wgs84_geojson(shapely_shape(bbox_geojson), scene.crs)
+        
+        centroid_shapely = shapely_shape(wgs84_geojson).centroid
+        lon, lat = centroid_shapely.x, centroid_shapely.y
+        
         features.append(
             {
                 "type": "Feature",
-                "geometry": candidate.geometry,
+                "geometry": wgs84_geojson,
                 "properties": {
-                    "detector_type": candidate.detector_type.value,
-                    "model_id": candidate.model_id,
-                    "model_confidence": candidate.model_confidence,
-                    "investigation_confidence": candidate.investigation_confidence,
-                    "investigation_confidence_breakdown": [
-                        {"reason": item.reason, "delta": item.delta}
-                        for item in candidate.investigation_confidence_breakdown
-                    ],
-                    "geometry_source": candidate.geometry_source.value,
-                    "geometry_quality": candidate.geometry_quality.value,
-                    "quality_flags": candidate.quality_flags,
-                    "candidate_envelope_area_km2": candidate.candidate_envelope_area_km2,
-                    "derived_contour_area_km2": derived_area,
-                    "centroid": list(candidate.centroid),
-                    "perimeter_km": candidate.perimeter_km,
-                    "major_axis_km": candidate.major_axis_km,
-                    "minor_axis_km": candidate.minor_axis_km,
-                    "elongation": candidate.elongation,
-                    "orientation_degrees": candidate.orientation_degrees,
-                    "component_count": candidate.component_count,
-                    "tile_provenance": candidate.tile_provenance,
+                    "spill_id": spill_id,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "bbox": [det.x1, det.y1, det.x2, det.y2],
+                    "confidence": det.confidence,
+                    "model_confidence": det.confidence,
+                    "class_id": det.class_id,
+                    "class_name": "oil",
+                    "detector_type": "yolo_mvp",
+                    "model_id": model_id,
+                    "tile_provenance": det.tile_indices or [det.tile_index],
                 },
             }
         )
+        
+    scene_geom = shapely_shape(bbox_to_polygon(0, 0, db.shape[1], db.shape[0], scene.transform))
+    scene_wgs84 = geometry_to_wgs84_geojson(scene_geom, scene.crs)
+    scene_bbox = list(shapely_shape(scene_wgs84).bounds)
 
     return JobResult(
         num_oil_polygons=len(features),
-        total_oil_area_km2=total_derived_area,
+        total_oil_area_km2=0.0,
         geojson={
             "type": "FeatureCollection",
             "features": features,
             "metadata": {
                 "detector": "yolo_mvp",
-                "model_id": output.model_id,
-                "scene_id": output.scene_id,
-                "scene_crs": output.crs,
-                "scene_bbox": output.bbox,
-                "scene_metadata": output.scene_metadata,
-                "area_description": (
-                    "Sum of approximate derived contour areas only; bbox fallbacks excluded."
-                ),
+                "model_id": model_id,
+                "scene_id": Path(safe_path).stem,
+                "scene_crs": str(scene.crs),
+                "scene_bbox": scene_bbox,
+                "image_width": db.shape[1],
+                "image_height": db.shape[0],
+                "scene_metadata": {
+                    "tile_size": config.tile_size,
+                    "tile_overlap": config.tile_overlap,
+                    "conf_threshold": config.conf_threshold,
+                    "iou_threshold": config.iou_threshold,
+                }
             },
         },
+        yolo_result_image=yolo_result_image,
     )
 
 

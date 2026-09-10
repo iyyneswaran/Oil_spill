@@ -51,6 +51,7 @@ export interface JobResult {
   num_oil_polygons: number;
   total_oil_area_km2: number;
   geojson: FeatureCollection;
+  yolo_result_image?: string;
 }
 
 export interface Job {
@@ -84,6 +85,20 @@ export interface EnvironmentalContext {
   wind_speed_ms?: number;
   optical_corroboration?: boolean;
   optical_conflict?: boolean;
+}
+
+export interface YoloRawDetection {
+  spill_id: string;
+  latitude: number;
+  longitude: number;
+  bbox: [number, number, number, number];
+  confidence: number;
+  model_confidence: number;
+  class_id: number;
+  class_name: string;
+  detector_type: DetectorType;
+  model_id: string;
+  tile_provenance: number[];
 }
 
 export interface YoloCandidateResult {

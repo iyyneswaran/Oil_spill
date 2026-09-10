@@ -118,6 +118,7 @@ class JobResult(BaseModel):
     num_oil_polygons: int
     total_oil_area_km2: float
     geojson: dict[str, Any]
+    yolo_result_image: str | None = None
 
 
 class JobStatusResponse(BaseModel):

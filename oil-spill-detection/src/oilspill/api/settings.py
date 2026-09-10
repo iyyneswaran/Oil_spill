@@ -54,7 +54,11 @@ class Settings(BaseSettings):
 
     # YOLO MVP detector. The workspace ships a local MVP checkpoint outside the
     # package directory; deployments can override this with the env setting.
-    yolo_weights: Path | None = Path("../results/weights/yolo26n.pt")
+    yolo_weights: Path | None = (
+        Path("../results/weights/best.pt")
+        if Path("../results/weights/best.pt").exists()
+        else Path("../results/weights/yolo26n.pt")
+    )
     yolo_conf_threshold: float = 0.25
     yolo_iou_threshold: float = 0.45
     yolo_tile_size: int = 1024
