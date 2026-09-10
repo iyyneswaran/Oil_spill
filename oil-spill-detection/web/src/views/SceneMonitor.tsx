@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { createSceneJob, getJob, getModels } from "../lib/api";
+import { createSceneJob, getJob, getModels, getYoloStatus } from "../lib/api";
 import type { Job, ModelInfo, DetectorType, YoloCandidateResult } from "../lib/types";
 import type { FeatureCollection, Polygon } from "../lib/geojson";
 
@@ -68,6 +68,7 @@ export default function SceneMonitor() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelId, setModelId] = useState<string>("");
   const [detector, setDetector] = useState<DetectorType>("segmentation");
+  const [yoloAvailable, setYoloAvailable] = useState<boolean | null>(null);
   const [windSpeed, setWindSpeed] = useState<string>("");
   const [opticalConfirm, setOpticalConfirm] = useState(false);
   const [yoloCandidates, setYoloCandidates] = useState<YoloCandidateResult[]>([]);
@@ -139,18 +140,24 @@ export default function SceneMonitor() {
         },
       });
       m.addLayer({
-        id: "yolo-line",
+        id: "yolo-line-solid",
         type: "line",
         source: "yolo",
+        filter: ["!=", ["get", "geometry_source"], "bbox_fallback"],
         paint: {
           "line-color": "#d35400",
           "line-width": 1.5,
-          "line-dasharray": [
-            "case",
-            ["==", ["get", "geometry_source"], "bbox_fallback"],
-            ["literal", [3, 3]],
-            ["literal", [1, 0]]
-          ],
+        },
+      });
+      m.addLayer({
+        id: "yolo-line-dashed",
+        type: "line",
+        source: "yolo",
+        filter: ["==", ["get", "geometry_source"], "bbox_fallback"],
+        paint: {
+          "line-color": "#d35400",
+          "line-width": 1.5,
+          "line-dasharray": [3, 3],
         },
       });
     });
@@ -170,6 +177,20 @@ export default function SceneMonitor() {
       })
       .catch(() => {
         /* model is optional for scene jobs */
+      });
+  }, []);
+
+  useEffect(() => {
+    getYoloStatus()
+      .then((status) => {
+        setYoloAvailable(status.available);
+        if (!status.available) {
+          setDetector((current) => (current === "yolo_mvp" ? "segmentation" : current));
+        }
+      })
+      .catch(() => {
+        setYoloAvailable(false);
+        setDetector((current) => (current === "yolo_mvp" ? "segmentation" : current));
       });
   }, []);
 
@@ -307,9 +328,10 @@ export default function SceneMonitor() {
             </button>
             <button
               className={detector === "yolo_mvp" ? "active" : ""}
+              disabled={yoloAvailable !== true}
               onClick={() => setDetector("yolo_mvp")}
             >
-              YOLO MVP
+              YOLO MVP{yoloAvailable === false ? " (unavailable)" : ""}
             </button>
           </div>
 

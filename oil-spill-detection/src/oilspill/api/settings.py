@@ -52,8 +52,9 @@ class Settings(BaseSettings):
     # Optional Natural Earth land geometry, shared by the two scene pathways.
     coastlines_path: Path | None = None
 
-    # YOLO MVP detector (optional — API starts normally without these)
-    yolo_weights: Path | None = None
+    # YOLO MVP detector. The workspace ships a local MVP checkpoint outside the
+    # package directory; deployments can override this with the env setting.
+    yolo_weights: Path | None = Path("../results/weights/yolo26n.pt")
     yolo_conf_threshold: float = 0.25
     yolo_iou_threshold: float = 0.45
     yolo_tile_size: int = 1024
