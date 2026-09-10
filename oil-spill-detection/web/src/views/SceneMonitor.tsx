@@ -256,7 +256,7 @@ export default function SceneMonitor() {
           ? {
               environmental_context: {
                 ...(windSpeed ? { wind_speed_ms: Number(windSpeed) } : {}),
-                optical_corroboration: opticalConfirm,
+                ...(opticalConfirm ? { optical_corroboration: true } : {}),
               },
             }
           : {}),
@@ -473,7 +473,8 @@ export default function SceneMonitor() {
                       <div className="yolo-disclaimer">
                         <strong>YOLO MVP Detector</strong>
                         <p style={{ margin: "0.25rem 0 0 0" }}>
-                          These are heuristic-based candidate detections. They require manual review.
+                          Approximate candidate detections only — not confirmed oil and not a five-class
+                          classification. Requires manual review.
                         </p>
                       </div>
                       {yoloCandidates.length === 0 ? (
@@ -491,13 +492,13 @@ export default function SceneMonitor() {
                                 }`}
                               >
                                 {c.geometry_source === "derived_contour"
-                                  ? "Contour"
-                                  : "BBox"}
+                                  ? "Approximate geometry"
+                                  : "BBox fallback"}
                               </span>
                             </h4>
                             <div className="confidence-bars">
                               <div className="confidence-bar">
-                                <span className="bar-label">Model Conf</span>
+                                <span className="bar-label">Raw model confidence</span>
                                 <div className="bar-track">
                                   <div
                                     className="bar-fill model"
@@ -509,7 +510,7 @@ export default function SceneMonitor() {
                                 </span>
                               </div>
                               <div className="confidence-bar">
-                                <span className="bar-label">Investigate Conf</span>
+                                <span className="bar-label">Heuristic investigation score</span>
                                 <div className="bar-track">
                                   <div
                                     className="bar-fill heuristic"
@@ -543,15 +544,31 @@ export default function SceneMonitor() {
                             )}
 
                             <div className="candidate-measurements">
-                              <div className="label">Area</div>
+                              <div className="label">
+                                {c.geometry_source === "derived_contour"
+                                  ? "Derived candidate contour"
+                                  : "Bounding-box envelope (not slick shape)"}
+                              </div>
                               <div className="value">
                                 {(
                                   c.derived_contour_area_km2 ?? c.candidate_envelope_area_km2
                                 ).toFixed(2)}{" "}
                                 km²
                               </div>
+                              <div className="label">Perimeter (approx.)</div>
+                              <div className="value">{c.perimeter_km.toFixed(2)} km</div>
                               <div className="label">Elongation</div>
                               <div className="value">{c.elongation.toFixed(2)}</div>
+                              <div className="label">Orientation (approx.)</div>
+                              <div className="value">{c.orientation_degrees.toFixed(0)}° from north</div>
+                              <div className="label">Geometry source</div>
+                              <div className="value">{c.geometry_source}</div>
+                              {c.component_count != null && (
+                                <>
+                                  <div className="label">Dark components</div>
+                                  <div className="value">{c.component_count}</div>
+                                </>
+                              )}
                             </div>
 
                             {c.quality_flags?.length > 0 && (

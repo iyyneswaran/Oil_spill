@@ -148,10 +148,28 @@ download from CDSE (`--aoi`, the only networked mode), an already-downloaded
 
 The project supports two distinct detection pathways unified under `oilspill.detectors.contracts.DetectionOutput`:
 
+The YOLO MVP path reuses CDSE ingestion and the SAFE calibration -> Lee filter ->
+filtered-dB pipeline, but it renders a separate uint8 three-channel image rather
+than using the segmentation ImageNet-normalized tensor. It uses tiled
+1024px-compatible inference, clips/remaps boxes to scene pixels, performs global
+NMS, and records tile provenance. Its external checkpoint has one `oil` class
+only: YOLO is not a five-class semantic classifier.
+
 1. **Segmentation (Default/Production)** — The primary pathway using the ONNX semantic-segmentation model described above. It produces pixel-level masks and is the focus of all metrics reporting.
 2. **YOLO MVP** — A secondary bounding-box pathway introduced for rapid MVP candidate generation. It uses a YOLO detection model to find candidate regions, then derives an *approximate* polygon contour directly from the SAR image data inside the box.
 
 Both pathways emit a shared `DetectionOutput` contract. This ensures downstream systems (API and frontend) never confuse YOLO image-derived contours with true segmentation masks. The YOLO MVP pathway requires `ultralytics` and an external checkpoint. See [`yolo_mvp.md`](yolo_mvp.md) for detailed configuration, the SAR-to-YOLO rendering assumptions, and the investigation confidence scoring heuristic.
+
+YOLO polygons are either `derived_contour` / `approximate` or `bbox_fallback` /
+`fallback`; a fallback rectangle is never presented as a slick shape. Candidate
+GeoJSON is EPSG:4326 and the contract separates raw `model_confidence` from the
+non-calibrated heuristic `investigation_confidence`, including every score
+adjustment, quality flag, approximate geodesic measurements, and component/tile
+provenance. The only implemented look-alike cues are transparent penalties or
+bonuses from an optional land mask and caller-supplied static wind/optical context.
+
+AIS ingestion, vessel reconstruction, environmental data retrieval, hindcasting,
+forward drift, and suspect scoring are explicit non-goals.
 
 ## Inference and serving
 
@@ -170,6 +188,7 @@ The API (`oilspill.api`, FastAPI) exposes:
 | `POST /predict` | Segment one uploaded image. |
 | `POST /jobs/scene` | Queue a full-scene AOI detection job. |
 | `GET /jobs/{job_id}` | Poll a scene job. |
+| `GET /yolo/status` | Report optional one-class YOLO availability without local paths. |
 
 The service caches ONNX sessions and keeps an in-process job store, so a single
 worker reuses both across requests. When `web/dist` exists it is mounted at `/`, so

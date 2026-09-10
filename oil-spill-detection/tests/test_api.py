@@ -303,6 +303,96 @@ def test_scene_job_lifecycle(client: TestClient) -> None:
     assert status["result"]["total_oil_area_km2"] == 1.25
 
 
+def test_yolo_status_and_scene_job_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A configured YOLO job uses the typed candidate GeoJSON result path."""
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"test-only")
+    monkeypatch.setattr(
+        "oilspill.detectors.yolo_detector.yolo_dependency_available", lambda: True
+    )
+
+    def _fake_yolo(
+        _aoi: dict[str, Any], _start: str, _end: str, _settings: Settings, _ctx: object
+    ) -> JobResult:
+        return JobResult(
+            num_oil_polygons=1,
+            total_oil_area_km2=0.02,
+            geojson={
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[[1.0, 1.0], [1.1, 1.0], [1.1, 1.1], [1.0, 1.0]]],
+                        },
+                        "properties": {
+                            "detector_type": "yolo_mvp",
+                            "geometry_source": "derived_contour",
+                            "model_confidence": 0.8,
+                            "investigation_confidence": 0.7,
+                        },
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr("oilspill.api.service._run_yolo_detection", _fake_yolo)
+    cfg = Settings(
+        yolo_weights=weights,
+        results_dir=tmp_path / "results",
+        onnx_dir=tmp_path / "exports",
+        default_onnx=tmp_path / "exports" / "model.onnx",
+        web_dist=tmp_path / "no-web",
+    )
+    app = create_app(cfg)
+    body = {
+        "aoi": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+        "start": "2024-01-01",
+        "end": "2024-01-31",
+        "detector": "yolo_mvp",
+        "environmental_context": {"wind_speed_ms": 2.0},
+    }
+    with TestClient(app) as c:
+        assert c.get("/yolo/status").json()["available"] is True
+        job_id = c.post("/jobs/scene", json=body).json()["job_id"]
+        status = c.get(f"/jobs/{job_id}").json()
+    assert status["status"] == "done"
+    assert status["result"]["num_oil_polygons"] == 1
+    assert status["result"]["geojson"]["features"][0]["properties"]["detector_type"] == "yolo_mvp"
+
+
+def test_yolo_dependency_missing_is_not_advertised_as_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"test-only")
+    monkeypatch.setattr(
+        "oilspill.detectors.yolo_detector.yolo_dependency_available", lambda: False
+    )
+    cfg = Settings(
+        yolo_weights=weights,
+        results_dir=tmp_path / "results",
+        web_dist=tmp_path / "no-web",
+    )
+    app = create_app(cfg)
+    body = {
+        "aoi": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+        "start": "2024-01-01",
+        "end": "2024-01-31",
+        "detector": "yolo_mvp",
+    }
+    with TestClient(app) as c:
+        status = c.get("/yolo/status")
+        queued = c.post("/jobs/scene", json=body)
+    assert status.json()["available"] is False
+    assert str(weights) not in status.text
+    assert queued.status_code == 503
+    assert "optional dependency" in queued.text
+
+
 def test_scene_job_error_captured() -> None:
     def _boom(*_args: Any, **_kwargs: Any) -> JobResult:
         raise RuntimeError("no scene found")

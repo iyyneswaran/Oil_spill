@@ -27,11 +27,12 @@ contract labels this transparently via ``geometry_source`` and ``geometry_qualit
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -48,6 +49,7 @@ from oilspill.detectors.contracts import (
 if TYPE_CHECKING:
     from affine import Affine
     from rasterio.crs import CRS
+    from shapely.geometry import Polygon
     from shapely.geometry.base import BaseGeometry
 
 logger = logging.getLogger(__name__)
@@ -133,6 +135,9 @@ class RawDetection:
     confidence: float
     class_id: int
     tile_index: int
+    # The primary tile remains available for backwards-compatible diagnostics;
+    # NMS records every overlapping tile that contributed a duplicate box here.
+    tile_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -153,6 +158,18 @@ class ContourResult:
 
     component_area_px: int = 0
     """Area of the selected component in pixels."""
+
+    component_count: int = 0
+    """Number of valid connected components found in the candidate crop."""
+
+
+def yolo_dependency_available() -> bool:
+    """Return whether the optional Ultralytics dependency is importable.
+
+    This deliberately checks module availability without importing Ultralytics,
+    so a base segmentation-only API process never pays its import cost.
+    """
+    return importlib.util.find_spec("ultralytics") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +209,9 @@ def sar_to_yolo_image(
     if db_min >= db_max:
         raise ValueError(f"require db_min < db_max, got db_min={db_min}, db_max={db_max}")
     arr = np.asarray(db_image, dtype=np.float64)
+    # Invalid raster cells should not become arbitrary uint8 values through a
+    # float-to-integer cast. Map them to the dark end of the documented window.
+    arr = np.nan_to_num(arr, nan=db_min, neginf=db_min, posinf=db_max)
     scaled = (arr - db_min) / (db_max - db_min)
     scaled = np.clip(scaled, 0.0, 1.0)
     gray = (scaled * 255.0).astype(np.uint8)
@@ -297,15 +317,28 @@ def global_nms(
         by_class.setdefault(det.class_id, []).append(det)
 
     kept: list[RawDetection] = []
-    for _cls, dets in by_class.items():
-        dets.sort(key=lambda d: d.confidence, reverse=True)
+    for _cls in sorted(by_class):
+        dets = by_class[_cls]
+        # A stable tie-break prevents mock/runtime ordering from changing the
+        # retained candidate or its provenance when confidences are identical.
+        dets.sort(key=lambda d: (-d.confidence, d.tile_index, d.y1, d.x1, d.y2, d.x2))
         retained: list[RawDetection] = []
         for det in dets:
-            if all(_iou(det, r) < iou_threshold for r in retained):
+            duplicate = next((r for r in retained if _iou(det, r) >= iou_threshold), None)
+            if duplicate is None:
+                if not det.tile_indices:
+                    det = replace(det, tile_indices=[det.tile_index])
                 retained.append(det)
+            else:
+                # Retain the highest-confidence geometry while preserving the
+                # fact that it was independently seen in overlapping tiles.
+                duplicate.tile_indices = sorted(
+                    set(duplicate.tile_indices or [duplicate.tile_index])
+                    | set(det.tile_indices or [det.tile_index])
+                )
         kept.extend(retained)
 
-    return kept
+    return sorted(kept, key=lambda d: (-d.confidence, d.class_id, d.tile_index, d.y1, d.x1))
 
 
 def run_tiled_yolo(
@@ -338,6 +371,8 @@ def run_tiled_yolo(
         Merged detections in scene pixel coordinates.
     """
     h, w = image.shape[:2]
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"YOLO image must have shape (H, W, 3), got {image.shape}")
     tiles = generate_tiles(h, w, tile_size=tile_size, overlap=tile_overlap)
 
     all_dets: list[RawDetection] = []
@@ -351,15 +386,25 @@ def run_tiled_yolo(
             if boxes is None or len(boxes) == 0:
                 continue
             for box_idx in range(len(boxes)):
-                xyxy = boxes.xyxy[box_idx].cpu().numpy().astype(int)
+                xyxy = np.asarray(boxes.xyxy[box_idx].cpu().numpy(), dtype=float)
+                if xyxy.shape[-1] != 4 or not np.isfinite(xyxy).all():
+                    continue
                 box_conf = float(boxes.conf[box_idx].cpu().numpy())
                 box_cls = int(boxes.cls[box_idx].cpu().numpy())
+                # Use floor/ceil so coordinate remapping does not shrink a
+                # detection, then clip to the full scene before contouring.
+                x1 = max(0, min(w, tile.x + int(math.floor(xyxy[0]))))
+                y1 = max(0, min(h, tile.y + int(math.floor(xyxy[1]))))
+                x2 = max(0, min(w, tile.x + int(math.ceil(xyxy[2]))))
+                y2 = max(0, min(h, tile.y + int(math.ceil(xyxy[3]))))
+                if x2 <= x1 or y2 <= y1:
+                    continue
                 all_dets.append(
                     RawDetection(
-                        x1=tile.x + int(xyxy[0]),
-                        y1=tile.y + int(xyxy[1]),
-                        x2=tile.x + int(xyxy[2]),
-                        y2=tile.y + int(xyxy[3]),
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
                         confidence=box_conf,
                         class_id=box_cls,
                         tile_index=tile.index,
@@ -408,15 +453,43 @@ def extract_contour(
     """
     import cv2
 
+    if min_pixels < 1:
+        raise ValueError(f"min_pixels must be >= 1, got {min_pixels}")
+    if morph_size < 1:
+        raise ValueError(f"morph_size must be >= 1, got {morph_size}")
+
+    h, w = sar_db.shape[:2]
     x1, y1, x2, y2 = bbox
-    crop = sar_db[y1:y2, x1:x2].copy()
+    x1, x2 = max(0, x1), min(w, x2)
+    y1, y2 = max(0, y1), min(h, y2)
+    crop = np.asarray(sar_db[y1:y2, x1:x2], dtype=np.float64).copy()
     if crop.size == 0:
-        return ContourResult(mask=None, success=False, quality_flags=["empty_bbox_crop"])
+        return ContourResult(
+            mask=None,
+            success=False,
+            quality_flags=["empty_bbox_crop", "contour_extraction_failed"],
+        )
+
+    finite = np.isfinite(crop)
+    if not finite.any():
+        return ContourResult(
+            mask=None,
+            success=False,
+            quality_flags=["invalid_sar_crop", "contour_extraction_failed"],
+        )
+    # Invalid pixels are excluded from the derived mask but filled temporarily
+    # for Otsu, which only accepts finite uint8 input.
+    if not finite.all():
+        crop[~finite] = float(np.median(crop[finite]))
 
     # Normalise crop to 0–255 for Otsu.
     cmin, cmax = float(crop.min()), float(crop.max())
     if cmax - cmin < 1e-6:
-        return ContourResult(mask=None, success=False, quality_flags=["uniform_sar_crop"])
+        return ContourResult(
+            mask=None,
+            success=False,
+            quality_flags=["uniform_sar_crop", "contour_extraction_failed"],
+        )
     norm = ((crop - cmin) / (cmax - cmin) * 255).astype(np.uint8)
 
     # Otsu threshold — selects dark regions (oil is darker in SAR).
@@ -426,10 +499,14 @@ def extract_contour(
     # of the crop to avoid false triggers on uniformly noisy crops.
     q30 = float(np.percentile(crop, 30))
     quantile_mask = (crop <= q30).astype(np.uint8) * 255
+    quantile_mask[~finite] = 0
     binary = cv2.bitwise_and(binary, quantile_mask)
 
     # Morphological opening (remove small bright noise) then closing (fill holes).
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_size, morph_size))
+    # OpenCV accepts an even kernel but its anchor is asymmetric, so use the
+    # nearest odd size to keep the operation spatially centred and deterministic.
+    kernel_size = morph_size if morph_size % 2 else morph_size + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel)
 
@@ -451,11 +528,13 @@ def extract_contour(
     best_label = -1
     best_darkness = 0.0
     best_area = 0
+    valid_component_count = 0
 
     for label_id in range(1, num_labels):
         area = int(stats[label_id, cv2.CC_STAT_AREA])
         if area < min_pixels:
             continue
+        valid_component_count += 1
 
         component_mask = (labels == label_id)
         darkness = float(crop[component_mask].mean())  # dB — lower = darker
@@ -505,7 +584,10 @@ def extract_contour(
 
     if best_label < 0:
         return ContourResult(
-            mask=None, success=False, quality_flags=["contour_extraction_failed"]
+            mask=None,
+            success=False,
+            quality_flags=["contour_extraction_failed"],
+            component_count=valid_component_count,
         )
 
     result_mask = (labels == best_label).astype(np.uint8)
@@ -524,6 +606,7 @@ def extract_contour(
         quality_flags=flags,
         component_darkness=best_darkness,
         component_area_px=best_area,
+        component_count=valid_component_count,
     )
 
 
@@ -626,6 +709,20 @@ def bbox_to_polygon(
     }
 
 
+def geometry_to_wgs84_geojson(geom: BaseGeometry, crs: CRS) -> dict[str, Any]:
+    """Convert scene-CRS geometry to RFC 7946-compatible EPSG:4326 GeoJSON."""
+    from pyproj import CRS as PyprojCRS
+    from pyproj import Transformer
+    from shapely.ops import transform as transform_geometry
+
+    source_crs = PyprojCRS.from_user_input(crs)
+    wgs84 = PyprojCRS.from_epsg(4326)
+    if source_crs != wgs84:
+        transformer = Transformer.from_crs(source_crs, wgs84, always_xy=True)
+        geom = transform_geometry(transformer.transform, geom)
+    return dict(geom.__geo_interface__)
+
+
 def compute_geometry_metrics(
     geom: BaseGeometry,
     crs: CRS,
@@ -648,6 +745,78 @@ def compute_geometry_metrics(
         area_km2, perimeter_km, major_axis_km, minor_axis_km, elongation,
         orientation_degrees, centroid_lon, centroid_lat.
     """
+    return _compute_metric_values(geom, crs)
+
+
+def _compute_metric_values(geom: BaseGeometry, crs: CRS) -> dict[str, float]:
+    """Return consistent geodesic metrics in a local metric working frame."""
+    from pyproj import CRS as PyprojCRS
+    from pyproj import Geod, Transformer
+    from shapely.ops import transform as transform_geometry
+
+    from oilspill.pipeline.vectorize import polygon_area_km2
+
+    area_km2 = polygon_area_km2(geom, crs)
+    source_crs = PyprojCRS.from_user_input(crs)
+    wgs84 = PyprojCRS.from_epsg(4326)
+    to_wgs84 = Transformer.from_crs(source_crs, wgs84, always_xy=True).transform
+    geom_wgs84 = transform_geometry(to_wgs84, geom) if source_crs != wgs84 else geom
+
+    geod = Geod(ellps="WGS84")
+    if source_crs.is_geographic:
+        _, perimeter_m = geod.geometry_area_perimeter(geom_wgs84)
+    else:
+        # The Sentinel-1 projected scenes supported by this pipeline use metre
+        # grids (normally UTM), so planar perimeter is the local physical value.
+        perimeter_m = geom.length
+    centroid = geom_wgs84.centroid
+    centroid_lon, centroid_lat = float(centroid.x), float(centroid.y)
+    local_crs = PyprojCRS.from_proj4(
+        f"+proj=aeqd +lat_0={centroid_lat} +lon_0={centroid_lon} +datum=WGS84 +units=m +no_defs"
+    )
+    to_local = Transformer.from_crs(wgs84, local_crs, always_xy=True).transform
+    metric_geom = transform_geometry(to_local, geom_wgs84) if source_crs.is_geographic else geom
+    mrr = metric_geom.minimum_rotated_rectangle
+
+    major_axis_km = minor_axis_km = 0.0
+    elongation = 1.0
+    orientation = 0.0
+    if not mrr.is_empty and hasattr(mrr, "exterior"):
+        from shapely.geometry import Polygon as PolygonClass
+
+        mrr_polygon = cast(PolygonClass, mrr)
+        coords = list(mrr_polygon.exterior.coords)
+        edges = [
+            (
+                math.hypot(coords[i + 1][0] - coords[i][0], coords[i + 1][1] - coords[i][1]),
+                coords[i + 1][0] - coords[i][0],
+                coords[i + 1][1] - coords[i][1],
+            )
+            for i in range(len(coords) - 1)
+        ]
+        if len(edges) >= 2:
+            edges.sort(key=lambda edge: edge[0], reverse=True)
+            major_m, dx, dy = edges[0]
+            minor_m = edges[-1][0]
+            major_axis_km = major_m / 1e3
+            minor_axis_km = minor_m / 1e3
+            elongation = major_axis_km / minor_axis_km if minor_axis_km > 0 else 1.0
+            orientation = math.degrees(math.atan2(dx, dy)) % 180
+
+    return {
+        "area_km2": area_km2,
+        "perimeter_km": abs(perimeter_m) / 1e3,
+        "major_axis_km": major_axis_km,
+        "minor_axis_km": minor_axis_km,
+        "elongation": elongation,
+        "orientation_degrees": orientation,
+        "centroid_lon": centroid_lon,
+        "centroid_lat": centroid_lat,
+    }
+
+
+def _legacy_compute_geometry_metrics(geom: BaseGeometry, crs: CRS) -> dict[str, float]:
+    """Previous implementation retained temporarily for reference during migration."""
     from pyproj import CRS as PyprojCRS
     from pyproj import Geod
 
@@ -678,7 +847,10 @@ def compute_geometry_metrics(
     # Minimum rotated rectangle for major/minor axis and orientation.
     mrr = geom.minimum_rotated_rectangle
     if mrr is not None and not mrr.is_empty:
-        coords = list(mrr.exterior.coords)
+        from shapely.geometry import Polygon as PolygonClass
+
+        mrr_polygon = cast(PolygonClass, mrr)
+        coords = list(mrr_polygon.exterior.coords)
         edges = []
         for i in range(len(coords) - 1):
             dx = coords[i + 1][0] - coords[i][0]
@@ -774,6 +946,28 @@ def screen_land_overlap(
         return 0.0
     geom_area = geom.area
     return float(intersection.area / geom_area) if geom_area > 0 else 0.0
+
+
+def screen_land_mask_overlap(
+    geom: BaseGeometry,
+    land_mask: NDArray[np.bool_],
+    transform: Affine,
+) -> float:
+    """Estimate candidate land overlap against the existing scene land mask.
+
+    The rasterised geometry and land mask share the original scene grid, so this
+    works even when no coastline vector is retained after preprocessing.
+    """
+    from rasterio.features import geometry_mask
+
+    land = np.asarray(land_mask, dtype=bool)
+    if land.ndim != 2:
+        raise ValueError(f"land_mask must be 2-D, got shape {land.shape}")
+    inside = ~geometry_mask(
+        [geom], out_shape=land.shape, transform=transform, all_touched=True, invert=False
+    )
+    pixels = int(inside.sum())
+    return float((inside & land).sum() / pixels) if pixels else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +1071,7 @@ def compute_investigation_confidence(
     ctx = env_context or {}
     wind_speed = ctx.get("wind_speed_ms")
     optical = ctx.get("optical_corroboration")
+    optical_conflict = ctx.get("optical_conflict")
 
     if wind_speed is not None:
         if wind_speed < low_wind_threshold:
@@ -884,7 +1079,10 @@ def compute_investigation_confidence(
             score += penalty
             breakdown.append(
                 ConfidenceAdjustment(
-                    reason=f"Low wind speed ({wind_speed:.1f} m/s < {low_wind_threshold}): possible look-alike",
+                    reason=(
+                        f"Low wind speed ({wind_speed:.1f} m/s < {low_wind_threshold}): "
+                        "possible look-alike"
+                    ),
                     delta=penalty,
                 )
             )
@@ -893,7 +1091,10 @@ def compute_investigation_confidence(
             score += bonus
             breakdown.append(
                 ConfidenceAdjustment(
-                    reason=f"Moderate+ wind ({wind_speed:.1f} m/s): dark patch less likely a calm zone",
+                    reason=(
+                        f"Moderate+ wind ({wind_speed:.1f} m/s): "
+                        "dark patch less likely a calm zone"
+                    ),
                     delta=bonus,
                 )
             )
@@ -911,7 +1112,16 @@ def compute_investigation_confidence(
                 delta=bonus,
             )
         )
-    elif optical is None or optical is False:
+    elif optical_conflict is True:
+        penalty = -0.1
+        score += penalty
+        breakdown.append(
+            ConfidenceAdjustment(
+                reason="Optical context conflicts with candidate: penalty",
+                delta=penalty,
+            )
+        )
+    else:
         breakdown.append(
             ConfidenceAdjustment(reason="Optical confirmation unavailable", delta=0.0)
         )
@@ -943,10 +1153,11 @@ class YoloDetector:
 
     @property
     def available(self) -> bool:
-        """Whether YOLO weights are configured and the file exists."""
+        """Whether weights and the optional dependency are available."""
         return (
             self.config.weights_path is not None
             and self.config.weights_path.exists()
+            and yolo_dependency_available()
         )
 
     def _load_model(self) -> Any:
@@ -959,13 +1170,24 @@ class YoloDetector:
         path = self.config.weights_path
         if not path.exists():
             raise FileNotFoundError(
-                f"YOLO detector unavailable: weights not found at configured path. "
-                f"Set OILSPILL_API_YOLO_WEIGHTS to a valid checkpoint."
+                "YOLO detector unavailable: weights not found at configured path. "
+                "Set OILSPILL_API_YOLO_WEIGHTS to a valid checkpoint."
+            )
+        if not yolo_dependency_available():
+            raise RuntimeError(
+                "YOLO detector unavailable: optional dependency 'ultralytics' is not installed. "
+                "Install the project's yolo extra."
             )
         from ultralytics import YOLO
 
         self._model = YOLO(str(path))
-        logger.info("Loaded YOLO weights from %s", path)
+        names = getattr(self._model, "names", None)
+        if isinstance(names, dict) and len(names) != 1:
+            raise ValueError(
+                "YOLO detector expects the one-class oil checkpoint; configured weights expose "
+                f"{len(names)} classes."
+            )
+        logger.info("Loaded YOLO MVP checkpoint '%s'", path.name)
         return self._model
 
     def detect(
@@ -976,6 +1198,7 @@ class YoloDetector:
         *,
         scene_id: str = "",
         land_geometries: list[BaseGeometry] | None = None,
+        land_mask: NDArray[np.bool_] | None = None,
         env_context: dict[str, Any] | None = None,
     ) -> DetectionOutput:
         """Run the full YOLO MVP detection pipeline on a filtered dB SAR image.
@@ -992,6 +1215,10 @@ class YoloDetector:
             Identifier for the scene.
         land_geometries:
             Optional list of land polygons (in scene CRS) for overlap screening.
+        land_mask:
+            Optional rasterised land mask on the scene grid. This is the direct
+            reuse path for preprocessing's coastline mask when vectors are not
+            kept in memory.
         env_context:
             Optional environmental context dict.
 
@@ -999,6 +1226,13 @@ class YoloDetector:
         -------
         DetectionOutput
         """
+        sar_db = np.asarray(sar_db)
+        if sar_db.ndim != 2:
+            raise ValueError(f"sar_db must be a 2-D filtered dB array, got shape {sar_db.shape}")
+        if land_mask is not None and np.asarray(land_mask).shape != sar_db.shape:
+            raise ValueError(
+                f"land_mask shape {np.asarray(land_mask).shape} must match SAR shape {sar_db.shape}"
+            )
         model = self._load_model()
         cfg = self.config
         model_id = str(cfg.weights_path.name) if cfg.weights_path else "yolo_mvp"
@@ -1046,18 +1280,22 @@ class YoloDetector:
             if geom_shapely is not None and not geom_shapely.is_empty:
                 geometry_source = GeometrySource.derived_contour
                 geometry_quality = GeometryQuality.approximate
-                geojson_geom = geom_shapely.__geo_interface__
             else:
                 # Fallback to bbox polygon.
                 geometry_source = GeometrySource.bbox_fallback
                 geometry_quality = GeometryQuality.fallback
                 if "contour_extraction_failed" not in flags:
                     flags.append("contour_extraction_failed")
-                geojson_geom = bbox_to_polygon(det.x1, det.y1, det.x2, det.y2, transform)
                 # Create a shapely geometry from the GeoJSON for metrics.
                 from shapely.geometry import shape as shapely_shape
 
-                geom_shapely = shapely_shape(geojson_geom)
+                geom_shapely = shapely_shape(
+                    bbox_to_polygon(det.x1, det.y1, det.x2, det.y2, transform)
+                )
+
+            # Candidate GeoJSON is always WGS84. The source transform/CRS remains
+            # in the scene metadata, while raw scene geometry is used for metrics.
+            geojson_geom = geometry_to_wgs84_geojson(geom_shapely, crs)
 
             # Geometry metrics.
             metrics = compute_geometry_metrics(geom_shapely, crs)
@@ -1077,10 +1315,16 @@ class YoloDetector:
             else:
                 contour_area = None
 
+            if metrics["elongation"] > 25.0 or metrics["minor_axis_km"] <= 0.0:
+                flags.append("implausible_geometry")
+
             # Land overlap.
             land_frac = 0.0
             if land_geometries:
                 land_frac = screen_land_overlap(geom_shapely, land_geometries)
+            elif land_mask is not None:
+                land_frac = screen_land_mask_overlap(geom_shapely, land_mask, transform)
+            if land_frac:
                 if land_frac > 0.5:
                     flags.append("land_overlap_high")
                 elif land_frac > 0.1:
@@ -1093,7 +1337,9 @@ class YoloDetector:
             elif ctx["wind_speed_ms"] < cfg.low_wind_threshold:
                 flags.append("possible_low_wind_lookalike")
 
-            if ctx.get("optical_corroboration") is None:
+            if ctx.get("optical_conflict") is True:
+                flags.append("optical_context_conflict")
+            elif ctx.get("optical_corroboration") is None:
                 flags.append("optical_confirmation_unavailable")
 
             # Investigation confidence.
@@ -1125,16 +1371,27 @@ class YoloDetector:
                     minor_axis_km=metrics["minor_axis_km"],
                     elongation=metrics["elongation"],
                     orientation_degrees=metrics["orientation_degrees"],
-                    tile_provenance=[det.tile_index],
+                    tile_provenance=det.tile_indices or [det.tile_index],
+                    component_count=contour.component_count if contour.success else None,
                 )
             )
 
         # Scene bbox.
         h, w = sar_db.shape[:2]
-        corners = [transform * (0, 0), transform * (w, 0), transform * (w, h), transform * (0, h)]
-        lons = [c[0] for c in corners]
-        lats = [c[1] for c in corners]
-        scene_bbox = [min(lons), min(lats), max(lons), max(lats)]
+        from shapely.geometry import shape as shapely_shape3
+
+        scene_geom = shapely_shape3(bbox_to_polygon(0, 0, w, h, transform))
+        # ``__geo_interface__`` does not require a bbox member; use Shapely's
+        # bounds after the explicit WGS84 transform instead.
+        from pyproj import CRS as PyprojCRS
+        from pyproj import Transformer
+        from shapely.ops import transform as transform_geometry
+
+        scene_wgs84 = transform_geometry(
+            Transformer.from_crs(PyprojCRS.from_user_input(crs), 4326, always_xy=True).transform,
+            scene_geom,
+        )
+        scene_bbox = [float(value) for value in scene_wgs84.bounds]
 
         return DetectionOutput(
             detector_type=DetectorType.yolo_mvp,
@@ -1149,7 +1406,11 @@ class YoloDetector:
                 "conf_threshold": cfg.conf_threshold,
                 "iou_threshold": cfg.iou_threshold,
                 "db_window": [cfg.db_min, cfg.db_max],
-                "num_raw_detections_before_nms": len(detections),
+                "num_retained_detections": len(detections),
+                "confidence_description": "Raw YOLO output; not a calibrated probability.",
+                "investigation_confidence_description": (
+                    "Heuristic investigation score; not a calibrated probability."
+                ),
             },
         )
 
@@ -1165,9 +1426,12 @@ __all__ = [
     "compute_investigation_confidence",
     "extract_contour",
     "generate_tiles",
+    "geometry_to_wgs84_geojson",
     "global_nms",
     "polygonize_contour",
     "run_tiled_yolo",
     "sar_to_yolo_image",
     "screen_land_overlap",
+    "screen_land_mask_overlap",
+    "yolo_dependency_available",
 ]

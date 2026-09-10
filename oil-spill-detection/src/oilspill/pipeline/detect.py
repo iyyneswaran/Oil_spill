@@ -65,6 +65,8 @@ if TYPE_CHECKING:
     from affine import Affine
     from rasterio.crs import CRS
 
+    from oilspill.detectors.contracts import DetectionOutput
+    from oilspill.detectors.yolo_detector import YoloDetector
     from oilspill.pipeline.ingest import HttpSession
 
 # Standard output filenames written into ``out_dir``.
@@ -273,6 +275,108 @@ def detect_from_safe(
     )
 
 
+def detect_yolo_from_safe(
+    safe_path: Path | str,
+    detector: "YoloDetector",
+    *,
+    polarisation: str = "vv",
+    lee_size: int = 7,
+    coastlines_path: Path | str | None = None,
+    env_context: dict[str, object] | None = None,
+) -> "DetectionOutput":
+    """Run the YOLO MVP on the existing SAFE calibration/preprocessing chain.
+
+    This intentionally stops after filtered dB conversion: YOLO receives the
+    detector-specific uint8 rendering inside :class:`YoloDetector`, never the
+    segmentation model's ImageNet-normalised tensor.
+    """
+    scene = calibrate_safe(safe_path, polarisation=polarisation)
+    filtered = lee_filter(scene.sigma0, size=lee_size)
+    db = to_db(filtered)
+
+    land_mask: np.ndarray | None = None
+    if coastlines_path is not None:
+        land_mask = land_mask_from_coastlines(
+            scene.sigma0.shape,  # type: ignore[arg-type]
+            scene.transform,
+            scene.crs,
+            coastlines_path,
+        )
+    return detector.detect(
+        db,
+        scene.transform,
+        scene.crs,
+        scene_id=Path(safe_path).stem,
+        land_mask=land_mask,
+        env_context=dict(env_context) if env_context is not None else None,
+    )
+
+
+def _download_safe_for_aoi(
+    aoi_path: Path | str,
+    start: "datetime | str",
+    end: "datetime | str",
+    out_dir: Path | str,
+    *,
+    download_dir: Path | str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    polarisation: str = "vv",
+    session: "HttpSession | None" = None,
+) -> Path:
+    """Reuse the common CDSE AOI search/download flow for either detector."""
+    from oilspill.pipeline.ingest import (
+        download_product,
+        get_access_token,
+        load_aoi,
+        search_products,
+    )
+
+    aoi = load_aoi(aoi_path)
+    products = search_products(aoi, start, end, polarisation=polarisation.upper(), session=session)
+    if not products:
+        raise RuntimeError(f"No Sentinel-1 scenes found for the AOI between {start} and {end}.")
+    safe_dir = Path(download_dir) if download_dir is not None else Path(out_dir) / "safe"
+    token = get_access_token(user, password, session=session)
+    return download_product(products[0], safe_dir, token, session=session)
+
+
+def detect_yolo_from_aoi(
+    aoi_path: Path | str,
+    start: "datetime | str",
+    end: "datetime | str",
+    detector: "YoloDetector",
+    out_dir: Path | str,
+    *,
+    download_dir: Path | str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    polarisation: str = "vv",
+    coastlines_path: Path | str | None = None,
+    env_context: dict[str, object] | None = None,
+    session: "HttpSession | None" = None,
+) -> "DetectionOutput":
+    """Search/download a Sentinel-1 scene, then run the distinct YOLO pathway."""
+    safe_path = _download_safe_for_aoi(
+        aoi_path,
+        start,
+        end,
+        out_dir,
+        download_dir=download_dir,
+        user=user,
+        password=password,
+        polarisation=polarisation,
+        session=session,
+    )
+    return detect_yolo_from_safe(
+        safe_path,
+        detector,
+        polarisation=polarisation,
+        coastlines_path=coastlines_path,
+        env_context=env_context,
+    )
+
+
 def detect_from_aoi(
     aoi_path: Path | str,
     start: datetime | str,
@@ -321,22 +425,17 @@ def detect_from_aoi(
     DetectionResult
         Output paths and summary statistics.
     """
-    from oilspill.pipeline.ingest import (
-        download_product,
-        get_access_token,
-        load_aoi,
-        search_products,
+    safe_path = _download_safe_for_aoi(
+        aoi_path,
+        start,
+        end,
+        out_dir,
+        download_dir=download_dir,
+        user=user,
+        password=password,
+        polarisation=polarisation,
+        session=session,
     )
-
-    aoi = load_aoi(aoi_path)
-    products = search_products(aoi, start, end, polarisation=polarisation.upper(), session=session)
-    if not products:
-        raise RuntimeError(f"No Sentinel-1 scenes found for the AOI between {start} and {end}.")
-    product = products[0]
-
-    safe_dir = Path(download_dir) if download_dir is not None else Path(out_dir) / "safe"
-    token = get_access_token(user, password, session=session)
-    safe_path = download_product(product, safe_dir, token, session=session)
 
     return detect_from_safe(
         safe_path,
@@ -356,5 +455,7 @@ __all__ = [
     "DetectionResult",
     "detect_from_aoi",
     "detect_from_safe",
+    "detect_yolo_from_aoi",
+    "detect_yolo_from_safe",
     "run_detection",
 ]

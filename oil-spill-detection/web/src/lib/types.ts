@@ -83,6 +83,7 @@ export type GeometryQualityType = "approximate" | "fallback" | "high";
 export interface EnvironmentalContext {
   wind_speed_ms?: number;
   optical_corroboration?: boolean;
+  optical_conflict?: boolean;
 }
 
 export interface YoloCandidateResult {
@@ -103,6 +104,8 @@ export interface YoloCandidateResult {
   minor_axis_km: number;
   elongation: number;
   orientation_degrees: number;
+  component_count: number | null;
+  tile_provenance: number[];
 }
 
 export interface YoloDetectionResult {

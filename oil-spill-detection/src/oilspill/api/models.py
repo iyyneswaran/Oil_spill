@@ -102,6 +102,7 @@ class EnvironmentalContext(BaseModel):
 
     wind_speed_ms: float | None = None
     optical_corroboration: bool | None = None
+    optical_conflict: bool | None = None
 
 
 class SceneJobResponse(BaseModel):
@@ -164,6 +165,8 @@ class YoloCandidateResponse(BaseModel):
     minor_axis_km: float
     elongation: float
     orientation_degrees: float
+    tile_provenance: list[int] = Field(default_factory=list)
+    component_count: int | None = None
 
 
 class YoloDetectionResponse(BaseModel):

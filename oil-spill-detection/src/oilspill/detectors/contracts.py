@@ -125,6 +125,9 @@ class CandidateResult:
         Orientation of the major axis in degrees from north (0–180).
     tile_provenance:
         Optional list of tile indices that contributed this detection (YOLO only).
+    component_count:
+        Number of viable dark connected components seen in the YOLO box, when
+        contour extraction ran. It is an approximate fragmentation indicator.
     """
 
     detector_type: DetectorType
@@ -145,6 +148,7 @@ class CandidateResult:
     elongation: float
     orientation_degrees: float
     tile_provenance: list[int] = field(default_factory=list)
+    component_count: int | None = None
 
 
 @dataclass

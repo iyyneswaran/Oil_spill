@@ -157,11 +157,22 @@ def create_app(
     ) -> SceneJobResponse:
         # When YOLO MVP is requested, verify availability before queuing.
         if body.detector == "yolo_mvp":
+            from oilspill.detectors.yolo_detector import yolo_dependency_available
+
             if cfg.yolo_weights is None or not cfg.yolo_weights.exists():
                 raise HTTPException(
                     status_code=503,
                     detail="YOLO detector unavailable: weights not configured. "
                     "Set OILSPILL_API_YOLO_WEIGHTS to a valid checkpoint path.",
+                )
+            if not yolo_dependency_available():
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "YOLO detector unavailable: optional dependency 'ultralytics' "
+                        "is not installed. "
+                        "Install the project's yolo extra."
+                    ),
                 )
         job_id = jobs.create(detector=body.detector)
         env_ctx = (
@@ -192,12 +203,21 @@ def create_app(
 
     @app.get("/yolo/status", response_model=YoloStatusResponse, tags=["yolo"])
     def yolo_status(cfg: SettingsDep) -> YoloStatusResponse:
-        available = cfg.yolo_weights is not None and cfg.yolo_weights.exists()
+        from oilspill.detectors.yolo_detector import yolo_dependency_available
+
+        dependency_available = yolo_dependency_available()
+        available = (
+            cfg.yolo_weights is not None and cfg.yolo_weights.exists() and dependency_available
+        )
         model_id = cfg.yolo_weights.name if cfg.yolo_weights and available else None
         if available:
-            detail = f"YOLO detector ready (weights: {cfg.yolo_weights})"
+            detail = "YOLO MVP detector ready (one-class oil candidate model)."
         elif cfg.yolo_weights is not None:
-            detail = f"YOLO weights configured but file not found: {cfg.yolo_weights}"
+            detail = (
+                "YOLO optional dependency is not installed. Install the project's yolo extra."
+                if not dependency_available
+                else "YOLO weights are configured but unavailable."
+            )
         else:
             detail = "YOLO detector not configured (OILSPILL_API_YOLO_WEIGHTS unset)"
         return YoloStatusResponse(available=available, model_id=model_id, detail=detail)

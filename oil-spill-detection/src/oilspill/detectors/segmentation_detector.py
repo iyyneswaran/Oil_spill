@@ -8,7 +8,7 @@ modes can be consumed uniformly by the API.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from oilspill.detectors.contracts import (
     CandidateResult,
@@ -21,6 +21,7 @@ from oilspill.detectors.contracts import (
 
 if TYPE_CHECKING:
     import geopandas as gpd
+    from shapely.geometry import Polygon
 
 
 def segmentation_result_to_contract(
@@ -91,7 +92,10 @@ def segmentation_result_to_contract(
         elongation = 1.0
         orientation = 0.0
         if mrr is not None and not mrr.is_empty:
-            coords = list(mrr.exterior.coords)
+            from shapely.geometry import Polygon as PolygonClass
+
+            mrr_polygon = cast(PolygonClass, mrr)
+            coords = list(mrr_polygon.exterior.coords)
             if len(coords) >= 4:
                 edges = []
                 for i in range(len(coords) - 1):

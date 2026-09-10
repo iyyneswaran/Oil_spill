@@ -366,7 +366,7 @@ class JobStore:
             job.status = "running"
         try:
             if detector == "yolo_mvp" and settings is not None:
-                result = _run_yolo_detection(settings, env_context)
+                result = _run_yolo_detection(aoi, start, end, settings, env_context)
             else:
                 result = self._runner(aoi, start, end, model_id, registry)
             with job._lock:
@@ -415,24 +415,31 @@ def _run_scene_detection(
 
 
 def _run_yolo_detection(
+    aoi: dict[str, Any],
+    start: str,
+    end: str,
     settings: Settings,
     env_context: dict[str, Any] | None = None,
 ) -> JobResult:
-    """YOLO MVP scene runner.
+    """Run a full CDSE -> SAFE -> filtered-dB -> YOLO MVP scene job."""
+    import tempfile
 
-    Unlike the segmentation runner which performs a full CDSE search/download,
-    this placeholder runs YOLO detection on a pre-processed SAR scene.  A full
-    integration with the ingest pipeline would follow the same pattern as
-    ``_run_scene_detection`` but route through the YOLO detector instead.
-
-    For now, returns a structured result with YOLO candidate GeoJSON.
-    """
-    from oilspill.detectors.yolo_detector import YoloDetector, YoloDetectorConfig
+    from oilspill.detectors.yolo_detector import (
+        YoloDetector,
+        YoloDetectorConfig,
+        yolo_dependency_available,
+    )
+    from oilspill.pipeline.detect import detect_yolo_from_aoi
 
     if settings.yolo_weights is None or not settings.yolo_weights.exists():
         raise FileNotFoundError(
             "YOLO detector unavailable: weights not configured. "
             "Set OILSPILL_API_YOLO_WEIGHTS to a valid checkpoint path."
+        )
+    if not yolo_dependency_available():
+        raise RuntimeError(
+            "YOLO detector unavailable: optional dependency 'ultralytics' is not installed. "
+            "Install the project's yolo extra."
         )
 
     config = YoloDetectorConfig(
@@ -448,23 +455,73 @@ def _run_yolo_detection(
         simplify_tolerance=settings.yolo_contour_simplify_tolerance,
         low_wind_threshold=settings.yolo_low_wind_threshold,
     )
-    _detector = YoloDetector(config)
+    detector = YoloDetector(config)
+    with tempfile.TemporaryDirectory(prefix="oilspill-yolo-scene-") as tmp:
+        out_dir = Path(tmp)
+        aoi_path = out_dir / "aoi.geojson"
+        aoi_path.write_text(json.dumps(aoi), encoding="utf-8")
+        output = detect_yolo_from_aoi(
+            aoi_path,
+            start,
+            end,
+            detector,
+            out_dir,
+            coastlines_path=settings.coastlines_path,
+            env_context=env_context,
+        )
 
-    # NOTE: In a full integration, this would receive the preprocessed SAR scene
-    # from the ingest/preprocess pipeline.  For the MVP, the YOLO detector is
-    # available and ready to be called with a preprocessed scene when one is
-    # provided through the pipeline.
+    features: list[dict[str, Any]] = []
+    total_derived_area = 0.0
+    for candidate in output.candidates:
+        derived_area = candidate.derived_contour_area_km2
+        if derived_area is not None:
+            total_derived_area += derived_area
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": candidate.geometry,
+                "properties": {
+                    "detector_type": candidate.detector_type.value,
+                    "model_id": candidate.model_id,
+                    "model_confidence": candidate.model_confidence,
+                    "investigation_confidence": candidate.investigation_confidence,
+                    "investigation_confidence_breakdown": [
+                        {"reason": item.reason, "delta": item.delta}
+                        for item in candidate.investigation_confidence_breakdown
+                    ],
+                    "geometry_source": candidate.geometry_source.value,
+                    "geometry_quality": candidate.geometry_quality.value,
+                    "quality_flags": candidate.quality_flags,
+                    "candidate_envelope_area_km2": candidate.candidate_envelope_area_km2,
+                    "derived_contour_area_km2": derived_area,
+                    "centroid": list(candidate.centroid),
+                    "perimeter_km": candidate.perimeter_km,
+                    "major_axis_km": candidate.major_axis_km,
+                    "minor_axis_km": candidate.minor_axis_km,
+                    "elongation": candidate.elongation,
+                    "orientation_degrees": candidate.orientation_degrees,
+                    "component_count": candidate.component_count,
+                    "tile_provenance": candidate.tile_provenance,
+                },
+            }
+        )
+
     return JobResult(
-        num_oil_polygons=0,
-        total_oil_area_km2=0.0,
+        num_oil_polygons=len(features),
+        total_oil_area_km2=total_derived_area,
         geojson={
             "type": "FeatureCollection",
-            "features": [],
+            "features": features,
             "metadata": {
                 "detector": "yolo_mvp",
-                "model_id": str(settings.yolo_weights.name),
-                "status": "detector_ready",
-                "detail": "YOLO detector loaded; awaiting SAR scene input via pipeline.",
+                "model_id": output.model_id,
+                "scene_id": output.scene_id,
+                "scene_crs": output.crs,
+                "scene_bbox": output.bbox,
+                "scene_metadata": output.scene_metadata,
+                "area_description": (
+                    "Sum of approximate derived contour areas only; bbox fallbacks excluded."
+                ),
             },
         },
     )

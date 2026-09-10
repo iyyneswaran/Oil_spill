@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     tile_size: int = 512
     overlap: int = 64
     batch_size: int = 4
+    # Optional Natural Earth land geometry, shared by the two scene pathways.
+    coastlines_path: Path | None = None
 
     # YOLO MVP detector (optional — API starts normally without these)
     yolo_weights: Path | None = None
