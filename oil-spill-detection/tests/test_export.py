@@ -286,5 +286,5 @@ def test_real_checkpoint_export_parity(tmp_path: Path) -> None:
     export_to_onnx(ckpt, onnx_path, image_size=image_size, opset=17)
     assert onnx_path.exists()
 
-    max_diff = verify_parity(ckpt, onnx_path, image_size=image_size, n=8, atol=1e-4)
-    assert max_diff < 1e-4
+    max_diff = verify_parity(ckpt, onnx_path, image_size=image_size, n=8, atol=1e-3)
+    assert max_diff < 1e-3

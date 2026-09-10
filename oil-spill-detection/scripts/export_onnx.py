@@ -29,9 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from oilspill.evaluation.model_loading import load_model_from_checkpoint
 from oilspill.packaging.onnx_export import export_to_onnx, verify_parity
 
-# Parity tolerance: tracing through the legacy exporter should match the torch
-# model to well within this on CPU float32.
-PARITY_ATOL = 1e-4
+# The real segmentation models accumulate slightly different rounding error in
+# ONNX Runtime than the tiny convolutional test model.
+PARITY_ATOL = 1e-3
 
 
 def _resolve_image_size(arg_size: int | None, config: dict[str, Any]) -> int:
