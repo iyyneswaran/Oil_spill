@@ -1,4 +1,6 @@
 import type {
+  HindcastRequest,
+  HindcastResponse,
   Job,
   ModelsResponse,
   PredictResponse,
@@ -76,4 +78,14 @@ export async function getJob(id: string): Promise<Job> {
 
 export async function getYoloStatus(): Promise<YoloStatusResponse> {
   return asJson(await fetch(url("/yolo/status")));
+}
+
+export async function runHindcast(body: HindcastRequest): Promise<HindcastResponse> {
+  return asJson(
+    await fetch(url("/hindcast"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
 }

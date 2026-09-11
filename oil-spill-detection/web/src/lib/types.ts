@@ -138,3 +138,59 @@ export interface YoloStatusResponse {
   model_id: string | null;
   detail: string;
 }
+
+// --- Hindcast types --------------------------------------------------------
+
+export interface HistoricalVector {
+  timestamp: string;
+  eastward_ms: number;
+  northward_ms: number;
+}
+
+export interface CurrentOilSlickInput {
+  latitude: number;
+  longitude: number;
+  detection_time: string;
+  slick_area_km2: number;
+}
+
+export interface HindcastConfigInput {
+  duration_hours?: number;
+  step_minutes?: number;
+  particle_count?: number;
+  windage?: number;
+  horizontal_diffusivity_m2_s?: number;
+  random_seed?: number;
+  uncertainty_confidence?: number;
+}
+
+export interface HindcastRequest {
+  current_oil_slick: CurrentOilSlickInput;
+  ocean_currents: HistoricalVector[];
+  winds: HistoricalVector[];
+  config?: HindcastConfigInput;
+}
+
+export interface HindcastResultData {
+  current_oil_slick_location: {
+    latitude: number;
+    longitude: number;
+    slick_area_km2: number;
+  };
+  detection_time: string;
+  backward_trajectories: Array<{
+    particle_id: number;
+    coordinates: [number, number][];
+  }>;
+  probable_spill_origin: {
+    latitude: number;
+    longitude: number;
+  };
+  estimated_spill_time: string;
+  origin_probability: number;
+}
+
+export interface HindcastResponse {
+  json: HindcastResultData;
+  geojson: FeatureCollection;
+}

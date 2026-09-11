@@ -46,6 +46,7 @@ from oilspill.api.models import (
 )
 from oilspill.api.service import JobStore, ModelRegistry, predict_image
 from oilspill.api.settings import Settings, get_settings
+from oilspill.hindcast import HindcastInput, run_hindcast
 
 if TYPE_CHECKING:
     from oilspill.api.service import SceneRunner
@@ -222,10 +223,32 @@ def create_app(
             detail = "YOLO detector not configured (OILSPILL_API_YOLO_WEIGHTS unset)"
         return YoloStatusResponse(available=available, model_id=model_id, detail=detail)
 
+    @app.post("/hindcast", tags=["hindcast"])
+    def perform_hindcast(body: HindcastInput) -> dict:
+        result = run_hindcast(body)
+        return {
+            "json": result.to_dict(),
+            "geojson": result.to_geojson(),
+        }
+
     # Mount the built frontend last so the API routes above take precedence; only
-    # if it exists, so the API still serves standalone.
+    # if it exists, so the API still serves standalone with client-side SPA routing.
     if settings.web_dist.exists():
-        app.mount("/", StaticFiles(directory=settings.web_dist, html=True), name="web")
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        class SPAStaticFiles(StaticFiles):
+            async def get_response(self, path: str, scope: Any) -> Any:
+                try:
+                    response = await super().get_response(path, scope)
+                except (HTTPException, StarletteHTTPException) as ex:
+                    if ex.status_code == 404:
+                        return await super().get_response("index.html", scope)
+                    raise
+                if response.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                return response
+
+        app.mount("/", SPAStaticFiles(directory=settings.web_dist, html=True), name="web")
 
     return app
 

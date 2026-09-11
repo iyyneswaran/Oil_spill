@@ -3,12 +3,14 @@ import ConsoleStrip from "./components/ConsoleStrip";
 import Overview from "./pages/Overview";
 import QuickDetect from "./pages/QuickDetect";
 import SceneMonitor from "./pages/SceneMonitor";
+import Hindcast from "./pages/Hindcast";
 import Models from "./pages/Models";
 
 const NAV_ITEMS = [
   { to: "/", label: "Overview", end: true },
   { to: "/detect", label: "Quick Detect" },
   { to: "/scenes", label: "Scene Monitor" },
+  { to: "/hindcast", label: "Hindcast" },
   { to: "/models", label: "Models" },
 ] as const;
 
@@ -37,6 +39,7 @@ export default function App() {
           <Route path="/" element={<Overview />} />
           <Route path="/detect" element={<QuickDetect />} />
           <Route path="/scenes" element={<SceneMonitor />} />
+          <Route path="/hindcast" element={<Hindcast />} />
           <Route path="/models" element={<Models />} />
         </Routes>
       </main>

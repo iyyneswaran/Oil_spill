@@ -405,7 +405,14 @@ def _run_scene_detection(
         out_dir = Path(tmp)
         aoi_path = out_dir / "aoi.geojson"
         aoi_path.write_text(json.dumps(aoi), encoding="utf-8")
-        result = detect_from_aoi(aoi_path, start, end, onnx_path, out_dir)
+        result = detect_from_aoi(
+            aoi_path,
+            start,
+            end,
+            onnx_path,
+            out_dir,
+            download_dir=settings.scenes_dir,
+        )
         geojson = json.loads(Path(result.geojson_path).read_text(encoding="utf-8"))
         return JobResult(
             num_oil_polygons=result.num_oil_polygons,
@@ -414,7 +421,7 @@ def _run_scene_detection(
         )
 
 
-def annotate_yolo_image(yolo_image: np.ndarray, detections: list[Any]) -> str:
+def annotate_yolo_image(yolo_image: np.ndarray, detections: list[Any], max_dim: int = 1600) -> str:
     """Draw bounding boxes and confidence labels on the YOLO image and return a data URI."""
     import cv2
     img = yolo_image.copy()
@@ -422,6 +429,13 @@ def annotate_yolo_image(yolo_image: np.ndarray, detections: list[Any]) -> str:
         cv2.rectangle(img, (det.x1, det.y1), (det.x2, det.y2), (255, 0, 0), 2)
         label = f"oil {det.confidence:.2f}"
         cv2.putText(img, label, (det.x1, max(det.y1 - 5, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+    # Downsample large scenes for web preview so base64 payload is responsive (< 1MB)
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return _png_data_uri(img)
 
 
@@ -445,7 +459,7 @@ def _run_yolo_detection(
         geometry_to_wgs84_geojson,
     )
     from oilspill.pipeline.detect import _download_safe_for_aoi
-    from oilspill.pipeline.preprocess import calibrate_safe, lee_filter, to_db
+    from oilspill.pipeline.preprocess import calibrate_safe, lee_filter, to_db, read_grd_measurement
     from shapely.geometry import shape as shapely_shape
 
     if settings.yolo_weights is None or not settings.yolo_weights.exists():
@@ -476,13 +490,43 @@ def _run_yolo_detection(
     model = detector._load_model()
     model_id = str(config.weights_path.name) if config.weights_path else "yolo_mvp"
 
+    # Extract bounding box from AOI for windowed reading
+    bbox: tuple[float, float, float, float] | None = None
+    try:
+        geom = aoi.get("geometry", aoi)
+        coords = geom.get("coordinates", [[]])[0]
+        if coords:
+            lons = [float(pt[0]) for pt in coords]
+            lats = [float(pt[1]) for pt in coords]
+            pad = 0.02
+            bbox = (min(lons) - pad, min(lats) - pad, max(lons) + pad, max(lats) + pad)
+    except Exception:
+        bbox = None
+
     with tempfile.TemporaryDirectory(prefix="oilspill-yolo-scene-") as tmp:
         out_dir = Path(tmp)
         aoi_path = out_dir / "aoi.geojson"
         aoi_path.write_text(json.dumps(aoi), encoding="utf-8")
         
-        safe_path = _download_safe_for_aoi(aoi_path, start, end, out_dir)
-        scene = calibrate_safe(safe_path, polarisation="vv")
+        safe_path = _download_safe_for_aoi(
+            aoi_path,
+            start,
+            end,
+            out_dir,
+            download_dir=settings.scenes_dir,
+        )
+
+        # Fast path: read only the requested AOI bounding box using GCP windowed read
+        scene = None
+        if bbox is not None:
+            try:
+                scene = read_grd_measurement(safe_path, polarisation="vv", bbox=bbox)
+            except Exception:
+                scene = None
+
+        if scene is None:
+            scene = calibrate_safe(safe_path, polarisation="vv")
+
         filtered = lee_filter(scene.sigma0, size=7)
         db = to_db(filtered)
 

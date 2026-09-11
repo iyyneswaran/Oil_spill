@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 
 // Endpoints proxied to the local API during development.
 const apiTarget = process.env.VITE_DEV_API_TARGET ?? "http://localhost:7860";
-const proxied = ["/healthz", "/models", "/samples", "/predict", "/jobs", "/yolo"];
+const proxied = ["/healthz", "/models", "/samples", "/predict", "/jobs", "/yolo", "/hindcast"];
 
 export default defineConfig({
   plugins: [react()],

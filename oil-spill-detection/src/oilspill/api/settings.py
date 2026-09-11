@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     default_onnx: Path = Path("artifacts/exports/model.onnx")
     results_dir: Path = Path("docs/results")
     samples_dir: Path = Path("data/samples")
+    scenes_dir: Path = Path("data/scenes")
     web_dist: Path = Path("web/dist")
 
     tile_size: int = 512

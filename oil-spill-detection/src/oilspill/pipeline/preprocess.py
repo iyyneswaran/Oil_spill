@@ -259,6 +259,44 @@ def model_ready_chw(
     return np.transpose(normed, (2, 0, 1)).astype(np.float32)
 
 
+def extract_safe_if_zip(safe_path: str | Path) -> Path:
+    """If ``safe_path`` is a .zip archive, extract it and return the .SAFE directory."""
+    path = Path(safe_path)
+    if path.is_dir():
+        if path.suffix == ".SAFE" or (path / "manifest.safe").exists():
+            return path
+        for child in path.iterdir():
+            if child.is_dir() and (child.name.endswith(".SAFE") or (child / "manifest.safe").exists()):
+                return child
+        for manifest in path.rglob("manifest.safe"):
+            return manifest.parent
+        return path
+
+    if path.is_file() and path.suffix.lower() == ".zip":
+        import zipfile
+
+        out_dir = path.parent
+        stem = path.stem
+        if stem.endswith(".SAFE"):
+            expected = out_dir / stem
+            if expected.is_dir() and (expected / "manifest.safe").exists():
+                return expected
+        for child in out_dir.iterdir():
+            if child.is_dir() and child.name.endswith(".SAFE") and (child / "manifest.safe").exists():
+                return child
+
+        with zipfile.ZipFile(path, "r") as zf:
+            zf.extractall(out_dir)
+
+        for child in out_dir.iterdir():
+            if child.is_dir() and child.name.endswith(".SAFE") and (child / "manifest.safe").exists():
+                return child
+        for manifest in out_dir.rglob("manifest.safe"):
+            return manifest.parent
+
+    return path
+
+
 def calibrate_safe(
     safe_path: str | Path,
     *,
@@ -298,9 +336,12 @@ def calibrate_safe(
     CalibratedScene
         Linear-power sigma0 array with its affine transform and CRS.
     """
+    import logging
     import xarray_sentinel as xs
 
-    safe = Path(safe_path)
+    logger = logging.getLogger(__name__)
+
+    safe = extract_safe_if_zip(safe_path)
     if not safe.exists():
         raise FileNotFoundError(f"SAFE product not found: {safe}")
 
@@ -312,15 +353,23 @@ def calibrate_safe(
     mode = _acquisition_mode(safe, xs)
     group = f"{mode}/{pol}"
 
-    measurement = xs.open_sentinel1_dataset(str(safe), group=group)
-    calibration = xs.open_sentinel1_dataset(str(safe), group=f"{group}/calibration")
+    try:
+        measurement = xs.open_sentinel1_dataset(str(safe), group=group)
+        calibration = xs.open_sentinel1_dataset(str(safe), group=f"{group}/calibration")
 
-    dn = measurement["measurement"]
-    sigma0_da: xr.DataArray = xs.calibrate_intensity(dn, calibration["sigmaNought"])
+        dn = measurement["measurement"]
+        sigma0_da: xr.DataArray = xs.calibrate_intensity(dn, calibration["sigmaNought"])
 
-    transform, crs = _georef_from_dataarray(sigma0_da)
-    sigma0 = np.asarray(sigma0_da.values, dtype=np.float64)
-    return CalibratedScene(sigma0=sigma0, transform=transform, crs=crs)
+        transform, crs = _georef_from_dataarray(sigma0_da)
+        sigma0 = np.asarray(sigma0_da.values, dtype=np.float64)
+        return CalibratedScene(sigma0=sigma0, transform=transform, crs=crs)
+    except Exception as exc:
+        logger.warning(
+            "xarray-sentinel calibration failed on %s (%s); falling back to read_grd_measurement",
+            safe,
+            exc,
+        )
+        return read_grd_measurement(safe, polarisation=polarisation)
 
 
 def read_grd_measurement(
@@ -358,18 +407,28 @@ def read_grd_measurement(
     from rasterio.transform import from_gcps
     from rasterio.windows import Window
 
-    safe = Path(safe_path)
+    safe = extract_safe_if_zip(safe_path)
     pol = polarisation.lower()
-    tifs = sorted(safe.glob(f"measurement/*-{pol}-*.tiff"))
+    tifs = (
+        sorted(safe.glob(f"measurement/*-{pol}-*.tiff"))
+        + sorted(safe.glob(f"measurement/*-{pol}-*.tif"))
+        + sorted(safe.glob(f"*/*measurement*/*{pol}*.tif*"))
+        + sorted(safe.glob(f"*{pol}*.tif*"))
+    )
     if not tifs:
         raise FileNotFoundError(f"no {pol} measurement GeoTIFF under {safe}")
 
     with rasterio.open(tifs[0]) as ds:
         gcps, gcp_crs = ds.gcps
         if not gcps:
-            raise ValueError(f"{tifs[0].name} has no GCPs to georeference from")
-        full_transform = from_gcps(gcps)
-        crs = gcp_crs or CRS.from_epsg(4326)
+            if ds.transform and ds.crs:
+                full_transform = ds.transform
+                crs = ds.crs
+            else:
+                raise ValueError(f"{tifs[0].name} has no GCPs to georeference from")
+        else:
+            full_transform = from_gcps(gcps)
+            crs = gcp_crs or CRS.from_epsg(4326)
 
         if bbox is not None:
             # The GCP affine can be rotated/flipped (e.g. descending passes), so

@@ -280,6 +280,8 @@ def search_products(
     products = [_parse_product(record) for record in payload.get("value", [])]
     if polarisation:
         products = [p for p in products if _name_matches_polarisation(p.name, polarisation)]
+    # Prefer standard Sentinel-1 SAFE products over experimental COG variants
+    products.sort(key=lambda p: (1 if "_COG" in p.name.upper() else 0))
     return products
 
 
@@ -335,6 +337,10 @@ def download_product(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"{product.name}.zip"
+
+    # Fast path: if product is already fully downloaded, skip download immediately
+    if dest_path.exists() and product.size is not None and dest_path.stat().st_size == product.size:
+        return dest_path
 
     existing = dest_path.stat().st_size if dest_path.exists() else 0
 

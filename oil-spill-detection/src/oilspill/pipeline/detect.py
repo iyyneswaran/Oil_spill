@@ -337,8 +337,26 @@ def _download_safe_for_aoi(
     if not products:
         raise RuntimeError(f"No Sentinel-1 scenes found for the AOI between {start} and {end}.")
     safe_dir = Path(download_dir) if download_dir is not None else Path(out_dir) / "safe"
+    safe_dir.mkdir(parents=True, exist_ok=True)
+    from oilspill.pipeline.preprocess import extract_safe_if_zip
+
+    prod_name = products[0].name
+    for c_dir in (safe_dir, Path("data/scenes")):
+        if not c_dir.exists():
+            continue
+        target_safe = c_dir / f"{prod_name}.SAFE"
+        if not target_safe.exists():
+            target_safe = c_dir / prod_name
+        if target_safe.is_dir() and (target_safe / "manifest.safe").exists():
+            return target_safe
+
+        for zip_cand in (c_dir / f"{prod_name}.SAFE.zip", c_dir / f"{prod_name}.zip"):
+            if zip_cand.is_file() and zip_cand.stat().st_size > 10_000_000:
+                return extract_safe_if_zip(zip_cand)
+
     token = get_access_token(user, password, session=session)
-    return download_product(products[0], safe_dir, token, session=session)
+    downloaded = download_product(products[0], safe_dir, token, session=session)
+    return extract_safe_if_zip(downloaded)
 
 
 def detect_yolo_from_aoi(

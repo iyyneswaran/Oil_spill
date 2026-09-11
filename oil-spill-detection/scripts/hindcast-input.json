@@ -1,0 +1,46 @@
+{
+  "current_oil_slick": {
+    "latitude": 13.245,
+    "longitude": 80.521,
+    "detection_time": "2026-09-01T10:30:00Z",
+    "slick_area_km2": 2.4
+  },
+  "ocean_currents": [
+    {
+      "timestamp": "2026-08-30T10:30:00Z",
+      "eastward_ms": 0.10,
+      "northward_ms": -0.03
+    },
+    {
+      "timestamp": "2026-08-31T10:30:00Z",
+      "eastward_ms": 0.12,
+      "northward_ms": -0.04
+    },
+    {
+      "timestamp": "2026-09-01T10:30:00Z",
+      "eastward_ms": 0.09,
+      "northward_ms": -0.02
+    }
+  ],
+  "winds": [
+    {
+      "timestamp": "2026-08-30T10:30:00Z",
+      "eastward_ms": 3.0,
+      "northward_ms": 1.2
+    },
+    {
+      "timestamp": "2026-08-31T10:30:00Z",
+      "eastward_ms": 3.1,
+      "northward_ms": 1.4
+    },
+    {
+      "timestamp": "2026-09-01T10:30:00Z",
+      "eastward_ms": 2.8,
+      "northward_ms": 1.1
+    }
+  ],
+  "config": {
+    "duration_hours": 24,
+    "particle_count": 250
+  }
+}
